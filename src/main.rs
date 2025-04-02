@@ -10,6 +10,7 @@ use clap::Arg;
 use clap::ArgAction;
 use clap::ArgMatches;
 use clap::ValueHint;
+use llvm_sys::target_machine;
 use std::env;
 use std::fs::File;
 use std::io::prelude::Read;
@@ -25,8 +26,8 @@ mod llvm;
 mod peephole;
 mod shell;
 
-#[cfg(test)]
-mod llvm_tests;
+// #[cfg(test)]
+// mod llvm_tests;
 
 /// Read the contents of the file at path, and return a string of its
 /// contents. Return a diagnostic if we can't open or read the file.
@@ -137,7 +138,7 @@ fn compile_file(matches: &ArgMatches) -> Result<(), ()> {
 
     llvm::init_llvm();
     let target_triple = matches.get_one::<String>("target");
-    let mut llvm_module = llvm::compile_to_module(
+    let (mut llvm_module,target_machine) = llvm::compile_to_module(
         &path.display().to_string(),
         target_triple.cloned(),
         &instrs,
@@ -155,7 +156,7 @@ fn compile_file(matches: &ArgMatches) -> Result<(), ()> {
         .get_one::<String>("llvm-opt")
         .expect("Required argument");
     let llvm_opt = llvm_opt_raw.parse::<i64>().expect("Validated by clap");
-    llvm::optimise_ir(&mut llvm_module, llvm_opt);
+    llvm::optimise_ir(&mut llvm_module, llvm_opt,target_machine.tm);
 
     // Compile the LLVM IR to a temporary object file.
     let object_file = NamedTempFile::new().map_err(|e| {

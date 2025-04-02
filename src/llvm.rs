@@ -5,7 +5,7 @@ use llvm_sys::core::*;
 use llvm_sys::prelude::*;
 use llvm_sys::target::*;
 use llvm_sys::target_machine::*;
-use llvm_sys::transforms::pass_manager_builder::*;
+use llvm_sys::transforms::pass_builder::*;
 use llvm_sys::{LLVMBuilder, LLVMIntPredicate, LLVMModule};
 
 use std::ffi::{CStr, CString};
@@ -194,14 +194,16 @@ unsafe fn add_function_call(
     fn_name: &str,
     args: &mut [LLVMValueRef],
     name: &str,
+    ty: LLVMTypeRef,
 ) -> LLVMValueRef {
     let builder = Builder::new();
     builder.position_at_end(bb);
 
     let function = LLVMGetNamedFunction(module.module, module.new_string_ptr(fn_name));
 
-    LLVMBuildCall(
+    LLVMBuildCall2(
         builder.builder,
+        ty,
         function,
         args.as_mut_ptr(),
         args.len() as c_uint,
@@ -240,7 +242,7 @@ fn add_cells_init(
         // char* cells = malloc(num_cells);
         let num_cells = int32(init_values.len() as c_ulonglong);
         let mut malloc_args = vec![num_cells];
-        let cells_ptr = add_function_call(module, bb, "malloc", &mut malloc_args, "cells");
+        let cells_ptr = add_function_call(module, bb, "malloc", &mut malloc_args, "cells", int8_ptr_type());
 
         let one = int32(1);
         let false_ = LLVMConstInt(int1_type(), 1, LLVM_FALSE);
@@ -252,8 +254,9 @@ fn add_cells_init(
 
             // TODO: factor out a build_gep function.
             let mut offset_vec = vec![int32(offset as c_ulonglong)];
-            let offset_cell_ptr = LLVMBuildGEP(
+            let offset_cell_ptr = LLVMBuildGEP2(
                 builder.builder,
+                int8_ptr_type(),
                 cells_ptr,
                 offset_vec.as_mut_ptr(),
                 offset_vec.len() as u32,
@@ -262,7 +265,7 @@ fn add_cells_init(
 
             let mut memset_args =
                 vec![offset_cell_ptr, llvm_cell_val, llvm_cell_count, one, false_];
-            add_function_call(module, bb, "llvm.memset.p0i8.i32", &mut memset_args, "");
+            add_function_call(module, bb, "llvm.memset.p0i8.i32", &mut memset_args, "",LLVMVoidType());
 
             offset += cell_count;
         }
@@ -278,11 +281,11 @@ fn add_cells_cleanup(module: &mut Module, bb: LLVMBasicBlockRef, cells: LLVMValu
     unsafe {
         // free(cells);
         let mut free_args = vec![cells];
-        add_function_call(module, bb, "free", &mut free_args, "");
+        add_function_call(module, bb, "free", &mut free_args, "",LLVMVoidType());
     }
 }
 
-fn create_module(module_name: &str, target_triple: Option<String>) -> Module {
+fn create_module(module_name: &str, target_triple: Option<String>) -> (Module,TargetMachine) {
     let c_module_name = CString::new(module_name).unwrap();
     let module_name_char_ptr = c_module_name.to_bytes_with_nul().as_ptr() as *const _;
 
@@ -310,7 +313,7 @@ fn create_module(module_name: &str, target_triple: Option<String>) -> Module {
     // data layout from the target machine.
 
     add_c_declarations(&mut module);
-    module
+    (module,TargetMachine::new(target_triple_cstring.as_ptr()).unwrap())
 }
 
 fn add_main_fn(module: &mut Module) -> LLVMValueRef {
@@ -382,22 +385,25 @@ unsafe fn add_current_cell_access(
     let builder = Builder::new();
     builder.position_at_end(bb);
 
-    let cell_index = LLVMBuildLoad(
+    let cell_index = LLVMBuildLoad2(
         builder.builder,
+        int8_ptr_type(),
         cell_index_ptr,
         module.new_string_ptr("cell_index"),
     );
 
     let mut indices = vec![cell_index];
-    let current_cell_ptr = LLVMBuildGEP(
+    let current_cell_ptr = LLVMBuildGEP2(
         builder.builder,
+        int8_ptr_type(),
         cells,
         indices.as_mut_ptr(),
         indices.len() as u32,
         module.new_string_ptr("current_cell_ptr"),
     );
-    let current_cell = LLVMBuildLoad(
+    let current_cell = LLVMBuildLoad2(
         builder.builder,
+        int8_type(),
         current_cell_ptr,
         module.new_string_ptr("cell_value"),
     );
@@ -415,8 +421,9 @@ unsafe fn compile_increment(
     let builder = Builder::new();
     builder.position_at_end(bb);
 
-    let cell_index = LLVMBuildLoad(
+    let cell_index = LLVMBuildLoad2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cell_index_ptr,
         module.new_string_ptr("cell_index"),
     );
@@ -429,16 +436,18 @@ unsafe fn compile_increment(
     );
 
     let mut indices = vec![offset_cell_index];
-    let current_cell_ptr = LLVMBuildGEP(
+    let current_cell_ptr = LLVMBuildGEP2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cells,
         indices.as_mut_ptr(),
         indices.len() as c_uint,
         module.new_string_ptr("current_cell_ptr"),
     );
 
-    let cell_val = LLVMBuildLoad(
+    let cell_val = LLVMBuildLoad2(
         builder.builder,
+        int8_type(),
         current_cell_ptr,
         module.new_string_ptr("cell_value"),
     );
@@ -465,22 +474,26 @@ unsafe fn compile_set(
     let builder = Builder::new();
     builder.position_at_end(bb);
 
-    let cell_index = LLVMBuildLoad(
+    let cell_index = LLVMBuildLoad2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cell_index_ptr,
         module.new_string_ptr("cell_index"),
     );
 
     let offset_cell_index = LLVMBuildAdd(
         builder.builder,
+        // int8_ptr_type(),
         cell_index,
         int32(offset as c_ulonglong),
         module.new_string_ptr("offset_cell_index"),
+
     );
 
     let mut indices = vec![offset_cell_index];
-    let current_cell_ptr = LLVMBuildGEP(
+    let current_cell_ptr = LLVMBuildGEP2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cells,
         indices.as_mut_ptr(),
         indices.len() as c_uint,
@@ -542,8 +555,9 @@ unsafe fn compile_multiply_move(
     for target in targets {
         // Calculate the position of this target cell.
         let mut indices = vec![int32(*target as c_ulonglong)];
-        let target_cell_ptr = LLVMBuildGEP(
+        let target_cell_ptr = LLVMBuildGEP2(
             builder.builder,
+            int8_ptr_type(),
             cell_val_ptr,
             indices.as_mut_ptr(),
             indices.len() as c_uint,
@@ -551,8 +565,9 @@ unsafe fn compile_multiply_move(
         );
 
         // Get the current value of the target cell.
-        let target_cell_val = LLVMBuildLoad(
+        let target_cell_val = LLVMBuildLoad2(
             builder.builder,
+            int8_type(),
             target_cell_ptr,
             module.new_string_ptr("target_cell_val"),
         );
@@ -589,8 +604,9 @@ unsafe fn compile_ptr_increment(
     let builder = Builder::new();
     builder.position_at_end(bb);
 
-    let cell_index = LLVMBuildLoad(
+    let cell_index = LLVMBuildLoad2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cell_index_ptr,
         module.new_string_ptr("cell_index"),
     );
@@ -614,15 +630,17 @@ unsafe fn compile_read(
     let builder = Builder::new();
     builder.position_at_end(bb);
 
-    let cell_index = LLVMBuildLoad(
+    let cell_index = LLVMBuildLoad2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cell_index_ptr,
         module.new_string_ptr("cell_index"),
     );
 
     let mut indices = vec![cell_index];
-    let current_cell_ptr = LLVMBuildGEP(
+    let current_cell_ptr = LLVMBuildGEP2(
         builder.builder,
+        int8_ptr_type(),
         ctx.cells,
         indices.as_mut_ptr(),
         indices.len() as u32,
@@ -630,7 +648,7 @@ unsafe fn compile_read(
     );
 
     let mut getchar_args = vec![];
-    let input_char = add_function_call(module, bb, "getchar", &mut getchar_args, "input_char");
+    let input_char = add_function_call(module, bb, "getchar", &mut getchar_args, "input_char", int8_type());
     let input_byte = LLVMBuildTrunc(
         builder.builder,
         input_char,
@@ -659,7 +677,7 @@ unsafe fn compile_write(
     );
 
     let mut putchar_args = vec![cell_val_as_char];
-    add_function_call(module, bb, "putchar", &mut putchar_args, "");
+    add_function_call(module, bb, "putchar", &mut putchar_args, "",LLVMVoidType());
     bb
 }
 
@@ -792,6 +810,7 @@ fn compile_static_outputs(module: &mut Module, bb: LLVMBasicBlockRef, outputs: &
             "write",
             &mut [stdout_fd, known_outputs_ptr, llvm_num_outputs],
             "",
+            LLVMVoidType()
         );
     }
 }
@@ -823,8 +842,8 @@ pub fn compile_to_module(
     target_triple: Option<String>,
     instrs: &[AstNode],
     initial_state: &ExecutionState,
-) -> Module {
-    let mut module = create_module(module_name, target_triple);
+) ->( Module,TargetMachine) {
+    let( mut module,tm) = create_module(module_name, target_triple);
     let main_fn = add_main_fn(&mut module);
 
     let (init_bb, mut bb) = add_initial_bbs(&mut module, main_fn);
@@ -872,29 +891,31 @@ pub fn compile_to_module(
 
         add_main_cleanup(bb);
 
-        module
+        (module,tm)
     }
 }
 
-pub fn optimise_ir(module: &mut Module, llvm_opt: i64) {
+pub fn optimise_ir(module: &mut Module, llvm_opt: i64,tm: LLVMTargetMachineRef) {
     // TODO: add a verifier pass too.
     unsafe {
-        let builder = LLVMPassManagerBuilderCreate();
-        // E.g. if llvm_opt is 3, we want a pass equivalent to -O3.
-        LLVMPassManagerBuilderSetOptLevel(builder, llvm_opt as u32);
+        // let builder = LLVMPassManagerBuilderCreate();
+        // // E.g. if llvm_opt is 3, we want a pass equivalent to -O3.
+        // LLVMPassManagerBuilderSetOptLevel(builder, llvm_opt as u32);
+        let opts = LLVMCreatePassBuilderOptions();
 
-        let pass_manager = LLVMCreatePassManager();
-        LLVMPassManagerBuilderPopulateModulePassManager(builder, pass_manager);
 
-        LLVMPassManagerBuilderDispose(builder);
+        // let pass_manager = LLVMCreatePassManager();
+        // LLVMPassManagerBuilderPopulateModulePassManager(builder, pass_manager);
+
+        // LLVMPassManagerBuilderDispose(builder);
 
         // Run twice. This is a hack, we should really work out which
         // optimisations need to run twice. See
         // http://llvm.org/docs/Frontend/PerformanceTips.html#pass-ordering
-        LLVMRunPassManager(pass_manager, module.module);
-        LLVMRunPassManager(pass_manager, module.module);
+        LLVMRunPasses( module.module,c"".as_ptr(),tm,opts);
+        LLVMRunPasses( module.module,c"".as_ptr(),tm,opts);
 
-        LLVMDisposePassManager(pass_manager);
+        // LLVMDisposePassManager(pass_manager);
     }
 }
 
@@ -909,12 +930,12 @@ pub fn get_default_target_triple() -> CString {
     target_triple
 }
 
-struct TargetMachine {
-    tm: LLVMTargetMachineRef,
+pub struct TargetMachine {
+    pub tm: LLVMTargetMachineRef,
 }
 
 impl TargetMachine {
-    fn new(target_triple: *const i8) -> Result<Self, String> {
+    pub fn new(target_triple: *const i8) -> Result<Self, String> {
         let mut target = null_mut();
         let mut err_msg_ptr = null_mut();
         unsafe {
